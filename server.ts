@@ -15,18 +15,22 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = 3000;
 
+// Trust proxy for secure cookies in AI Studio iframe
+app.set("trust proxy", 1);
+
 // Spotify Config
 const CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
-const REDIRECT_URI = `${process.env.APP_URL}/auth/callback`;
+const APP_URL = process.env.APP_URL?.replace(/\/$/, "");
+const REDIRECT_URI = `${APP_URL}/auth/callback`;
 
 app.use(express.json());
-app.use(cookieParser());
 app.use(
   session({
     secret: "spotify-screensaver-secret",
     resave: false,
     saveUninitialized: false,
+    proxy: true,
     cookie: {
       secure: true,
       sameSite: "none",
@@ -35,6 +39,12 @@ app.use(
     },
   })
 );
+
+// Session Debug Middleware
+app.use((req, res, next) => {
+  console.log(`[${req.method}] ${req.url} - Session ID: ${req.sessionID} - Cookie: ${req.headers.cookie}`);
+  next();
+});
 
 // Auth Routes
 app.get("/api/auth/url", (req, res) => {
@@ -83,25 +93,37 @@ app.get(["/auth/callback", "/auth/callback/"], async (req, res) => {
     );
 
     const { access_token, refresh_token, expires_in } = response.data;
+    const expiresAt = Date.now() + expires_in * 1000;
+
+    // We still save to session as a backup, but we'll primarily use client-side storage
     (req.session as any).accessToken = access_token;
     (req.session as any).refreshToken = refresh_token;
-    (req.session as any).expiresAt = Date.now() + expires_in * 1000;
+    (req.session as any).expiresAt = expiresAt;
 
-    res.send(`
-      <html>
-        <body>
-          <script>
-            if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-              window.close();
-            } else {
-              window.location.href = '/';
-            }
-          </script>
-          <p>Authentication successful. This window should close automatically.</p>
-        </body>
-      </html>
-    `);
+    req.session.save(() => {
+      res.send(`
+        <html>
+          <body>
+            <script>
+              if (window.opener) {
+                window.opener.postMessage({ 
+                  type: 'OAUTH_AUTH_SUCCESS',
+                  payload: {
+                    accessToken: '${access_token}',
+                    refreshToken: '${refresh_token}',
+                    expiresAt: ${expiresAt}
+                  }
+                }, '*');
+                window.close();
+              } else {
+                window.location.href = '/';
+              }
+            </script>
+            <p>Authentication successful. This window should close automatically.</p>
+          </body>
+        </html>
+      `);
+    });
   } catch (error: any) {
     console.error("Token exchange error:", error.response?.data || error.message);
     res.status(500).send("Authentication failed");
@@ -121,11 +143,52 @@ app.post("/api/auth/logout", (req, res) => {
 
 // Spotify Data Routes
 app.get("/api/spotify/tracks", async (req, res) => {
+  console.log("GET /api/spotify/tracks - Session ID:", req.sessionID);
   const sessionData = req.session as any;
-  const accessToken = sessionData.accessToken;
+  let accessToken = sessionData.accessToken;
+  const refreshToken = sessionData.refreshToken;
+  const expiresAt = sessionData.expiresAt;
+
+  // Check Authorization header if session is empty
+  const authHeader = req.headers.authorization;
+  if (!accessToken && authHeader && authHeader.startsWith("Bearer ")) {
+    accessToken = authHeader.split(" ")[1];
+    console.log("Using access token from Authorization header");
+  }
 
   if (!accessToken) {
+    console.warn("No access token in session or headers");
     return res.status(401).json({ error: "Not authenticated" });
+  }
+
+  // Refresh token if expired
+  if (Date.now() > expiresAt && refreshToken) {
+    try {
+      const response = await axios.post(
+        "https://accounts.spotify.com/api/token",
+        new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+        }).toString(),
+        {
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64")}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+        }
+      );
+
+      accessToken = response.data.access_token;
+      sessionData.accessToken = accessToken;
+      if (response.data.refresh_token) {
+        sessionData.refreshToken = response.data.refresh_token;
+      }
+      sessionData.expiresAt = Date.now() + response.data.expires_in * 1000;
+    } catch (error: any) {
+      console.error("Token refresh error:", error.response?.data || error.message);
+      req.session.destroy(() => {});
+      return res.status(401).json({ error: "Session expired" });
+    }
   }
 
   try {

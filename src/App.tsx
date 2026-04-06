@@ -1,21 +1,41 @@
 import React, { useState, useEffect } from "react";
-import { Music, Play, LogOut, Maximize2, Github } from "lucide-react";
-import Screensaver from "./components/Screensaver";
+import { Music, Play, LogOut, Maximize2, Github, LayoutGrid } from "lucide-react";
+import AuraPlayer from "./components/AuraPlayer";
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
-  const [isScreensaverActive, setIsScreensaverActive] = useState(false);
+  const [isPlayerActive, setIsPlayerActive] = useState(false);
+  const [accessToken, setAccessToken] = useState<string | null>(localStorage.getItem("spotify_access_token"));
+
+  useEffect(() => {
+    console.log("App State - isAuthenticated:", isAuthenticated, "isPlayerActive:", isPlayerActive);
+  }, [isAuthenticated, isPlayerActive]);
 
   useEffect(() => {
     checkAuth();
 
     const handleMessage = (event: MessageEvent) => {
       if (event.data?.type === "OAUTH_AUTH_SUCCESS") {
+        console.log("OAuth Success received with payload:", event.data.payload ? "present" : "missing");
         setIsAuthenticated(true);
+        if (event.data.payload?.accessToken) {
+          setAccessToken(event.data.payload.accessToken);
+          localStorage.setItem("spotify_access_token", event.data.payload.accessToken);
+          if (event.data.payload.refreshToken) {
+            localStorage.setItem("spotify_refresh_token", event.data.payload.refreshToken);
+          }
+          if (event.data.payload.expiresAt) {
+            localStorage.setItem("spotify_expires_at", event.data.payload.expiresAt.toString());
+          }
+        }
       }
     };
+
     window.addEventListener("message", handleMessage);
-    return () => window.removeEventListener("message", handleMessage);
+
+    return () => {
+      window.removeEventListener("message", handleMessage);
+    };
   }, []);
 
   const checkAuth = async () => {
@@ -23,6 +43,8 @@ export default function App() {
       const response = await fetch("/api/auth/status");
       const data = await response.json();
       setIsAuthenticated(data.authenticated);
+      // If session says authenticated but we don't have token in state, 
+      // we might still need to rely on session or fetch it.
     } catch (err) {
       setIsAuthenticated(false);
     }
@@ -41,26 +63,24 @@ export default function App() {
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST" });
     setIsAuthenticated(false);
+    setAccessToken(null);
+    localStorage.removeItem("spotify_access_token");
+    localStorage.removeItem("spotify_refresh_token");
+    localStorage.removeItem("spotify_expires_at");
   };
 
-  const startScreensaver = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch((err) => {
-        console.warn(`Error attempting to enable full-screen mode: ${err.message}`);
-      });
-    }
-    setIsScreensaverActive(true);
+  const startPlayer = () => {
+    console.log("Starting player...");
+    setIsPlayerActive(true);
   };
 
-  const stopScreensaver = () => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    }
-    setIsScreensaverActive(false);
+  const stopPlayer = () => {
+    console.log("Stopping player...");
+    setIsPlayerActive(false);
   };
 
-  if (isScreensaverActive) {
-    return <Screensaver onExit={stopScreensaver} />;
+  if (isPlayerActive) {
+    return <AuraPlayer onClose={stopPlayer} accessToken={accessToken} />;
   }
 
   return (
@@ -97,7 +117,7 @@ export default function App() {
           </h1>
           
           <p className="text-lg md:text-xl text-white/40 max-w-xl mb-12 font-light leading-relaxed">
-            A minimal, animated screensaver that transforms your Spotify library into a cinematic visual experience.
+            A cinematic visualizer that transforms your Spotify library into a beautiful, interactive experience.
           </p>
 
           {isAuthenticated === null ? (
@@ -105,18 +125,18 @@ export default function App() {
           ) : isAuthenticated ? (
             <div className="flex flex-col items-center gap-6">
               <button
-                onClick={startScreensaver}
+                onClick={startPlayer}
                 className="group relative px-12 py-5 bg-white text-black rounded-full font-medium text-lg overflow-hidden transition-all hover:scale-105 active:scale-95"
               >
                 <div className="absolute inset-0 bg-gradient-to-r from-blue-400 to-purple-400 opacity-0 group-hover:opacity-100 transition-opacity" />
                 <span className="relative z-10 flex items-center gap-3">
                   <Play className="w-5 h-5 fill-current" />
-                  Launch Screensaver
+                  Enter Aura Player
                 </span>
               </button>
               <p className="text-xs text-white/20 uppercase tracking-widest flex items-center gap-2">
-                <Maximize2 className="w-3 h-3" />
-                Fullscreen recommended
+                <LayoutGrid className="w-3 h-3" />
+                Interactive Visualizer
               </p>
             </div>
           ) : (
